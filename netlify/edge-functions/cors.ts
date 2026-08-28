@@ -8,5 +8,5 @@ import corsEdge from "@selfctl/agent-kit/edge-cors";
 export default corsEdge;
 
 export const config: Config = {
-  path: "/*",
+  path: "/agent/*",
 };

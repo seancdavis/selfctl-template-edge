@@ -3,8 +3,7 @@ import { z } from "zod";
 
 // The `reference.note` proposal kind: its payload is the note text, and
 // `write` is the trusted-side effect that runs once a human approves (or
-// overrides) the proposal — see agent-kit's gate (`approve`/`override` in
-// `@selfctl/agent-kit/runtime`), which calls this inside a DB transaction.
+// overrides) the proposal — the kit's gate calls this inside a DB transaction.
 const NotePayload = z.object({ text: z.string().min(1).max(4000) });
 
 const noteProposalKind = defineProposalKind({
@@ -16,8 +15,8 @@ const noteProposalKind = defineProposalKind({
 });
 
 // The tool the model calls. It never writes anything itself — `rt.propose`
-// just inserts a pending row in `pending_proposals`; nothing lands in `notes`
-// until a human approves it through `POST /proposals/:id/decision`.
+// just records a pending proposal; nothing lands in `notes` until a human
+// approves it through `POST /agent/proposals/:id/decision`.
 export const notesSkill: Skill = {
   name: "notes",
   proposals: [noteProposalKind],

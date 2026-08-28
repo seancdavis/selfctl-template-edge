@@ -1,18 +1,11 @@
 # selfctl agent starter
 
-A minimal, deployable, protocol-conformant **selfctl agent** — a Netlify site
-that implements the selfctl agent protocol over HTTP. Fork it, deploy it, and
-you have a running agent in minutes.
-
-`POST /message` runs a real LLM turn via `runTurn` from
-[`@selfctl/agent-kit`](https://www.npmjs.com/package/@selfctl/agent-kit): the
-model can call a `createNote` tool, which proposes a `reference.note` — it
-never writes anything itself. Approving (or overriding) the proposal is what
-actually runs the skill's `write()` and lands a row in the `notes` table, via
-agent-kit's gate (`POST /proposals/:id/decision`). That message → LLM →
-proposal → human decision → write loop, over the cursored event log, is the
-whole point of this starter: it's the smallest possible agent that's
-conformant with the selfctl agent protocol.
+A fork of this repo is an app: TanStack Start pages and typed server functions
+over your own database, with the whole selfctl agent protocol served under
+`/agent/*` by [`@selfctl/agent-kit`](https://www.npmjs.com/package/@selfctl/agent-kit) —
+one server route, a background turn function, and a scheduled tick. The
+template itself carries no protocol code; it describes an agent, ships one
+skill, and gives you an admin page.
 
 ## Deploy
 
@@ -22,120 +15,103 @@ conformant with the selfctl agent protocol.
 2. When prompted, set `AGENT_ADMIN_KEY` to a long, random value — this is the
    deploy-time root secret for your agent. Only you (the deployer) should
    know it.
-3. Also set `OPENROUTER_API_KEY` (an [OpenRouter](https://openrouter.ai/keys)
-   API key) — `POST /message` needs it to run the LLM turn.
-4. Once the deploy finishes, open the deployed site.
-5. Enter your admin key in the **Unlock** form and click **Unlock** — this
-   reveals the connection token.
-6. Copy the connection token and hand it to whatever client will talk to the
-   agent (e.g. a desktop app), or use it directly as the bearer token for the
-   protocol endpoints below.
+3. Once the deploy finishes, open the deployed site and unlock the admin page
+   with your admin key to get the connection token (see below).
 
-`@netlify/database` auto-provisions a Postgres database and applies the
-migrations in `netlify/database/migrations` at deploy time — no manual DB
-setup required.
+A real model reply needs Netlify AI Gateway, which only injects credentials
+for a deployed site or a project linked with `netlify link` — it isn't
+available to an unlinked local `vite dev`.
 
-## Auth: admin key vs. connection token
+`@netlify/database` auto-provisions a Postgres database, but does not
+auto-apply migrations — see [Local dev](#local-dev) and `docs/smoke.md`.
 
-This agent uses the framework's two-tier auth model:
+## File map
 
-- **`AGENT_ADMIN_KEY`** — a deploy-time root secret, set as a site environment
-  variable. Only the deployer knows it. It gates `/config/*` and can also be
-  used anywhere a connection token is accepted (the admin can do anything).
-- **Connection token** — minted once on first use, stored in the `config`
-  table. This is the bearer clients (like a desktop app) actually use against
-  the protocol endpoints (`/message`, `/events`, `/proposals/:id/decision`,
-  `/summary`). It's never printed to logs or config files — the only way to
-  see it is through the admin-gated UI.
+| Path | What it is |
+|---|---|
+| `selfctl.config.ts` | The only place the agent is described — id, system prompt, skills, model shortlist. |
+| `db/schema.ts` | Your database schema: the kit's tables via `export * from "@selfctl/agent-kit/db"`, plus your own (`notes`). |
+| `skills/` | What your agent can do — see `skills/notes.ts`. |
+| `src/routes/agent.$.ts` | The protocol mount: every HTTP method under `/agent/*` goes to the kit's handler. |
+| `src/routes/index.tsx` | The admin page — claim flow + model picker, nothing else. |
+| `netlify/functions/agent-turn.ts` | The background function that actually runs a turn. |
+| `netlify/functions/agent-tick.ts` | The once-a-minute scheduler that drains due tasks. |
+| `netlify/edge-functions/cors.ts` | CORS for `/agent/*`, wired to the kit's implementation. |
+| `netlify/database/migrations/` | Fork-owned migrations — the single source of truth for the deployed database. |
 
-## Run it locally
+## Connecting a client
 
-```bash
-netlify dev
+A client (a desktop app, a script, curl) talks to the protocol at:
+
+```
+https://<your-site>/agent
 ```
 
-Set `AGENT_ADMIN_KEY` and `OPENROUTER_API_KEY` in the site's environment (or a
-local `.env`) before starting.
+with a connection token as the bearer. To get that token, open the deployed
+site, enter your `AGENT_ADMIN_KEY` in the unlock form, and copy the token it
+reveals. The admin key itself also works as a bearer against `/agent/*` — the
+admin can do anything a client can.
 
-## Using the UI
+## The database
 
-Visit the site (locally: `http://localhost:8888`). Enter the admin key and
-click **Unlock** to reveal the connection token, with a copy button. A
-**Recent activity** panel lets you fetch and read the event log without a
-terminal.
+You own it. `db/schema.ts` re-exports the kit's tables (`selfctl_*`: the
+event log, proposals, threads, turns, scheduled tasks, config) alongside your
+own domain tables — the kit ships their shape as Drizzle definitions only, no
+runtime DDL and no migrations of its own. Your `netlify/database/migrations/`
+folder is the single source of truth for what's deployed.
 
-## Example curl loop
+Upgrading the kit:
 
-Set a couple of shell variables first:
-
-```bash
-export BASE_URL=http://localhost:8888
-export AGENT_ADMIN_KEY=dev-admin-key
+```sh
+npm i @selfctl/agent-kit@latest
+npm run db:generate   # writes a new migration
 ```
 
-**1. Fetch the connection token (admin key required):**
+Review the generated SQL, then commit the migration.
 
-```bash
-curl -s "$BASE_URL/config/token" \
-  -H "Authorization: Bearer $AGENT_ADMIN_KEY"
+## The frontend rule
+
+- **Read anything directly.** Pages and server functions can query the
+  database with Drizzle in a loader or server function — kit tables
+  included. There's no API to go through for reads.
+- **Write only through `/agent/*`.** Every domain write is a proposal a human
+  decided on: `POST /agent/message` to say something to the agent,
+  `POST /agent/proposals/:id/decision` to approve or reject what it
+  proposed. A page that writes a domain table directly has walked around the
+  gate.
+
+## Adding a skill
+
+A skill is tools (read), proposals (write, gated by human approval), and
+optional task handlers (deterministic work the tick runs later). Start from
+`skills/notes.ts` and register the new skill in `selfctl.config.ts`'s
+`skills: [...]` array.
+
+## Local dev
+
+```sh
+AGENT_ADMIN_KEY=your-dev-key npm run dev
 ```
 
-Save it for the rest of the loop:
+Then, once, apply migrations — the Netlify database plugin does not
+auto-apply them:
 
-```bash
-export CONNECTION_TOKEN=<connectionToken from the response above>
+```sh
+npx netlify database migrations apply
 ```
 
-**2. Send a message — starts a turn, returns a `turnId`:**
+`src/routeTree.gen.ts` is generated by `npm run dev` or `npm run build`. On a
+fresh clone, run one of those before `npm run typecheck`.
 
-```bash
-curl -s -X POST "$BASE_URL/message" \
-  -H "Authorization: Bearer $CONNECTION_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"text": "remember that the deploy key rotates on the 1st"}'
-```
+See `docs/smoke.md` for the full end-to-end local smoke of the protocol
+surface (threads, messages, the event log, streaming, the scheduled tick).
 
-**3. Poll the event log — watch the turn run and grab the proposal:**
+## Env vars
 
-```bash
-curl -s "$BASE_URL/events?since=0" \
-  -H "Authorization: Bearer $CONNECTION_TOKEN"
-```
-
-**4. Decide the proposal — approve it (use the `id` from the `proposal.created`
-event above):**
-
-```bash
-curl -s -X POST "$BASE_URL/proposals/<proposal-id>/decision" \
-  -H "Authorization: Bearer $CONNECTION_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"verb": "approve"}'
-```
-
-**5. Check the agent's identity + capabilities:**
-
-```bash
-curl -s "$BASE_URL/summary" \
-  -H "Authorization: Bearer $CONNECTION_TOKEN"
-```
-
-`AGENT_ADMIN_KEY` also works as the bearer for steps 2–5, since the admin can
-do anything a client can.
-
-## Fork & customize
-
-This repo is a starting point, not a finished product. Fork it, rename the
-agent identity in `netlify/functions/_shared/agent.ts`, and add your own
-skills next to `netlify/functions/_shared/skills/notes.ts` (each skill is a
-`Skill` from `@selfctl/agent-kit` — one or more `defineProposalKind`s, plus
-the tools the model calls to propose them — registered in
-`netlify/functions/_shared/deps.ts`'s `buildRegistry([...])` call). The
-protocol surface (events, proposals, decisions, summary) and the auth model
-are meant to stay — they're what makes an agent built this way conformant
-with the selfctl agent protocol.
-
-Conversation memory is intentionally out of scope for this starter: `runTurn`
-is called with `history: []` (single-turn) — there's no messages table.
+| Variable | Required | What it does |
+|---|---|---|
+| `AGENT_ADMIN_KEY` | yes | The one root secret. Gates the admin routes and mints the connection token. |
+| `OPENROUTER_API_KEY` | only if you switch providers | The default provider is Netlify AI Gateway, which needs no key of yours. |
 
 ## License
 

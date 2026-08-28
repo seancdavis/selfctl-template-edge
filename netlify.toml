@@ -3,7 +3,8 @@
 # env — it's the deploy-time root secret; the connection token clients actually
 # use is minted from it via the admin-gated UI (see README).
 [build]
-  publish = "public"
+  command = "vite build"
+  publish = "dist/client"
 
 [build.environment]
   NODE_VERSION = "24"
