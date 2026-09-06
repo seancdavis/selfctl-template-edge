@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 // The kit's tables (`selfctl_*`: the event log and its cursor, proposals, chat
 // threads/messages, turns, scheduled tasks, config) come from the kit as
@@ -15,6 +15,10 @@ export * from "@selfctl/agent-kit/db";
 export const notes = pgTable("notes", {
   id: uuid("id").primaryKey().defaultRandom(),
   text: text("text").notNull(),
+  // Set by the `pin` outcome rather than by plain approval — see `skills/notes.ts`.
+  // A proposal kind can declare several named outcomes, each with its own writer,
+  // so one card can offer more than a yes/no.
+  pinned: boolean("pinned").default(false).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
