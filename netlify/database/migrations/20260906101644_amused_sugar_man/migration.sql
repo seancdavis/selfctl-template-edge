@@ -1,0 +1,1 @@
+ALTER TABLE "selfctl_proposals" ADD COLUMN "view" jsonb;
