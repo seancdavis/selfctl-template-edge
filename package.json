@@ -13,8 +13,8 @@
   },
   "dependencies": {
     "@netlify/database": "^2.0.0",
-    "@selfctl/agent-kit": "^0.5.4",
-    "@selfctl/protocol": "^0.3.2",
+    "@selfctl/agent-kit": "^0.6.0",
+    "@selfctl/protocol": "^0.4.0",
     "@tanstack/react-router": "^1.170.32",
     "@tanstack/react-start": "^1.168.49",
     "drizzle-orm": "1.0.0-beta.22",
