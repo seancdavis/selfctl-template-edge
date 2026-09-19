@@ -1,8 +1,10 @@
 import {
   defineMutation,
   defineProposalKind,
+  enqueueScheduledTask,
   type Skill,
   type Sql,
+  type TaskHandlerDef,
   type WidgetProducer,
 } from "@selfctl/agent-kit";
 import type { View } from "@selfctl/protocol";
@@ -19,13 +21,24 @@ const NotePayload = z.object({
 
 type NotePayload = z.infer<typeof NotePayload>;
 
+// Returns the new row's id. Most callers still have no use for it — the
+// plain `write` below discards it same as always — but the `pin` outcome
+// needs it to queue that note's own auto-unpin chore, and it can only get it
+// from the INSERT that created the row.
 async function insertNote(
   sql: Sql,
   payload: NotePayload,
   pinned: boolean,
-): Promise<void> {
-  await sql`INSERT INTO notes (text, pinned, source_url) VALUES (${payload.text}, ${pinned}, ${payload.sourceUrl ?? null})`;
+): Promise<string> {
+  const [row] = await sql<{ id: string }[]>`
+    INSERT INTO notes (text, pinned, source_url)
+    VALUES (${payload.text}, ${pinned}, ${payload.sourceUrl ?? null})
+    RETURNING id
+  `;
+  return row.id;
 }
+
+const AUTO_UNPIN_DELAY_MS = 7 * 24 * 60 * 60 * 1000;
 
 // A proposal kind can offer more than a yes/no. `write` is what a plain
 // `approve` runs; each entry in `outcomes` is a separately named answer with
@@ -47,14 +60,31 @@ const noteProposalKind = defineProposalKind({
   },
   outcomes: {
     save: savingOutcome(false),
-    pin: savingOutcome(true),
+    // `pin` is the only outcome that also queues `notes.autoUnpin`, seven
+    // days out, in the same transaction as the insert — the note is pinned
+    // and the chore to undo that exists atomically, or neither does. `save`
+    // never pins, so it has nothing for that chore to undo; building it from
+    // `savingOutcome` like the others would queue a task for a commitment
+    // that was never made.
+    pin: {
+      write: async (sql: Sql, payload: NotePayload) => {
+        const id = await insertNote(sql, payload, true);
+        await enqueueScheduledTask(sql, {
+          kind: "notes.autoUnpin",
+          payload: { noteId: id },
+          runAt: new Date(Date.now() + AUTO_UNPIN_DELAY_MS),
+        });
+      },
+    },
     skip: { write: async () => {} },
   },
 });
 
 function savingOutcome(pinned: boolean) {
   return {
-    write: (sql: Sql, payload: NotePayload) => insertNote(sql, payload, pinned),
+    write: async (sql: Sql, payload: NotePayload) => {
+      await insertNote(sql, payload, pinned);
+    },
   };
 }
 
@@ -123,6 +153,21 @@ const notesUnpinMutation = defineMutation({
     await sql`UPDATE notes SET pinned = false WHERE id = ${payload.id}`;
   },
 });
+
+// Pinning something forever is a chore a human would otherwise have to
+// remember to undo — this is exactly the deterministic, no-model work the
+// tick exists for. It is the `notes.unpin` mutation above made by a clock
+// instead of a click, so the write is the same one-line UPDATE. The `AND
+// pinned` guard is what makes "clears it if it is still pinned" true without
+// a separate read: a note unpinned or deleted by hand in the intervening
+// week just makes this a no-op, not an error.
+const autoUnpinHandler: TaskHandlerDef = {
+  kind: "notes.autoUnpin",
+  handle: async (sql, payload) => {
+    const { noteId } = z.object({ noteId: z.string() }).parse(payload);
+    await sql`UPDATE notes SET pinned = false WHERE id = ${noteId} AND pinned`;
+  },
+};
 
 const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp|avif)$/i;
 
@@ -292,6 +337,7 @@ export const notesSkill: Skill = {
   proposals: [noteProposalKind],
   mutations: [notesDeleteMutation, notesUnpinMutation],
   widgets: [notesStatsWidget],
+  taskHandlers: [autoUnpinHandler],
   tools: (rt) => [
     {
       name: "createNote",
