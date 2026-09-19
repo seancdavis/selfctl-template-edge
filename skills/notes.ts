@@ -8,6 +8,7 @@ import { z } from "zod";
 const NotePayload = z.object({
   text: z.string().min(1).max(4000),
   topic: z.string().min(1).max(80),
+  sourceUrl: z.string().url().optional(),
 });
 
 type NotePayload = z.infer<typeof NotePayload>;
@@ -17,7 +18,7 @@ async function insertNote(
   payload: NotePayload,
   pinned: boolean,
 ): Promise<void> {
-  await sql`INSERT INTO notes (text, pinned) VALUES (${payload.text}, ${pinned})`;
+  await sql`INSERT INTO notes (text, pinned, source_url) VALUES (${payload.text}, ${pinned}, ${payload.sourceUrl ?? null})`;
 }
 
 // A proposal kind can offer more than a yes/no. `write` is what a plain
@@ -66,6 +67,11 @@ function noteProposalView(payload: NotePayload): View {
       { type: "text", value: "Save this note?", style: "heading" },
       { type: "text", value: payload.text, style: "body" },
       { type: "badge", label: payload.topic },
+      // A plain `link` here is enough for the human deciding whether to
+      // approve — no need to preview an image before the note even exists.
+      ...(payload.sourceUrl
+        ? [{ type: "link", href: payload.sourceUrl, label: "Source" } as View]
+        : []),
       {
         type: "actions",
         items: [
@@ -84,7 +90,20 @@ interface NoteRow {
   id: string;
   text: string;
   pinned: boolean;
+  sourceUrl: string | null;
   createdAt: Date;
+}
+
+const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp|avif)$/i;
+
+// `image` points at a URL that is already public on the internet, so any
+// client can fetch it directly. `asset` (a later slice) instead carries an id
+// that only a bearer token can resolve. That difference is the whole reason
+// both nodes exist: this one is for a source the agent never had to store.
+function sourceView(sourceUrl: string): View {
+  return IMAGE_EXTENSION.test(sourceUrl)
+    ? { type: "image", src: sourceUrl, alt: "Linked image" }
+    : { type: "link", href: sourceUrl, label: "Source" };
 }
 
 // The same vocabulary describes an inline chat component. Note the repetition
@@ -110,6 +129,7 @@ function noteListView(notes: NoteRow[]): View {
             ...(note.pinned
               ? [{ type: "badge", label: "pinned" } as View]
               : []),
+            ...(note.sourceUrl ? [sourceView(note.sourceUrl)] : []),
             {
               type: "text",
               value: note.createdAt.toISOString().slice(0, 10),
@@ -178,6 +198,11 @@ export const notesSkill: Skill = {
             description:
               "A short subject label for this note, a few words at most. Check your memory first and do not propose a topic you have already proposed.",
           },
+          sourceUrl: {
+            type: "string",
+            description:
+              "Where this note came from, if it was prompted by a URL the user shared. Optional — omit it for a note with no source.",
+          },
         },
         required: ["text", "topic"],
         additionalProperties: false,
@@ -207,15 +232,22 @@ export const notesSkill: Skill = {
       },
       execute: async () => {
         const rows = await rt.db<
-          { id: string; text: string; pinned: boolean; created_at: Date }[]
+          {
+            id: string;
+            text: string;
+            pinned: boolean;
+            source_url: string | null;
+            created_at: Date;
+          }[]
         >`
-          SELECT id, text, pinned, created_at FROM notes
+          SELECT id, text, pinned, source_url, created_at FROM notes
           ORDER BY pinned DESC, created_at DESC LIMIT 20
         `;
         const notes: NoteRow[] = rows.map((row) => ({
           id: row.id,
           text: row.text,
           pinned: row.pinned,
+          sourceUrl: row.source_url,
           createdAt: row.created_at,
         }));
         // The payload is the data; the view is how to draw it. A client that
