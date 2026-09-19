@@ -22,6 +22,8 @@ export const notes = pgTable("notes", {
   createdAt: timestamp("created_at", { withTimezone: true })
     .defaultNow()
     .notNull(),
+  sourceUrl: text("source_url"),
+  imageAssetId: text("image_asset_id"),
 });
 
 export type Note = typeof notes.$inferSelect;
