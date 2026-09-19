@@ -3,6 +3,7 @@ import {
   defineProposalKind,
   type Skill,
   type Sql,
+  type WidgetProducer,
 } from "@selfctl/agent-kit";
 import type { View } from "@selfctl/protocol";
 import { z } from "zod";
@@ -201,6 +202,55 @@ function noteListView(notes: NoteRow[]): View {
   };
 }
 
+// A widget is the one thing here with no model in the loop: the kit runs
+// `produce` straight against the database on a schedule the dashboard
+// controls, not in response to a tool call. `count(*) FILTER (WHERE ...)`
+// gets all three totals from one pass over `notes` rather than three
+// round trips. Postgres hands count(*) back as a string through this
+// driver, so every value gets coerced to a number before it is compared
+// or rendered.
+const notesStatsWidget: WidgetProducer = {
+  id: "notes-stats",
+  componentKind: "reference.notes-stats",
+  title: "Notes",
+  produce: async (db: Sql) => {
+    const [row] = await db<
+      { total: string; pinned: string; with_image: string }[]
+    >`
+      SELECT
+        count(*) AS total,
+        count(*) FILTER (WHERE pinned) AS pinned,
+        count(*) FILTER (WHERE image_asset_id IS NOT NULL) AS with_image
+      FROM notes
+    `;
+    const total = Number(row.total);
+    // A fresh fork's `notes` table is empty. A card reporting three zeroes
+    // teaches a reader nothing, so the widget hides itself instead of
+    // rendering one.
+    if (total === 0) return null;
+    return {
+      total,
+      pinned: Number(row.pinned),
+      withImage: Number(row.with_image),
+    };
+  },
+  // `payload` arrives as `unknown` because the kit stores and forwards it
+  // without knowing its shape — only this function does. The producer's
+  // own `title` already labels the card, so the numbers alone are the
+  // whole view.
+  view: (payload) => {
+    const stats = payload as { total: number; pinned: number; withImage: number };
+    return {
+      type: "keyValue",
+      items: [
+        { label: "Total", value: String(stats.total) },
+        { label: "Pinned", value: String(stats.pinned) },
+        { label: "With image", value: String(stats.withImage) },
+      ],
+    };
+  },
+};
+
 const MEMORY_HEADING = "Topics I have already proposed notes about:";
 const MAX_REMEMBERED_TOPICS = 40;
 
@@ -241,6 +291,7 @@ export const notesSkill: Skill = {
   name: "notes",
   proposals: [noteProposalKind],
   mutations: [notesDeleteMutation, notesUnpinMutation],
+  widgets: [notesStatsWidget],
   tools: (rt) => [
     {
       name: "createNote",
