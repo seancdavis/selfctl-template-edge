@@ -207,27 +207,31 @@ Headers should show `content-type: image/...` (whatever Gemini returned) and
 `cache-control: private, max-age=31536000, immutable` — private because it's bearer-gated,
 immutable because an asset id never changes underneath itself.
 
-## The scheduled tick, on a deploy
+## The scheduled tick, on a deploy preview
 
 `agent-tick.ts` declares `schedule: "* * * * *"` and nothing else — a scheduled function
-has no path, no bearer check, and nothing to curl. On a real deploy it just runs, once a
-minute, forever. To see it's alive: open the preview deploy in the Netlify UI → Functions
-→ `agent-tick`, and watch invocations roll in on a one-minute cadence, each logging its
-claimed/done report.
+has no path, no bearer check, and nothing to curl.
 
-The `notes.autoUnpin` task from step 6 won't fire for a week, which is too long to sit
-here waiting. To watch the tick actually drain something instead, queue a task with a
-past `run_at` directly, using the connection string from step 6:
+Netlify only *runs* a scheduled function automatically on a published production deploy —
+not on a deploy preview or branch deploy. On this preview, `agent-tick` will not fire on
+its own no matter how long you wait, so drain it by hand instead of watching for it.
+
+First queue a task with a past `run_at`, using the connection string from step 6:
 
 ```sh
 psql "$DB" -c "INSERT INTO selfctl_scheduled_tasks (id, kind, payload) VALUES \
   ('smoke-task-1', 'selfctl.turn', '{\"threadId\":\"$T\",\"text\":\"Scheduled smoke ping\"}'::jsonb);"
 ```
 
-Wait up to a minute, then poll the log again. A `turn.started` / `chat.appended` /
-`turn.finished` trio for the scheduled turn, followed by `task.finished
-{"kind":"selfctl.turn","status":"done","taskId":"smoke-task-1",...}`, shows the tick
-picked it up entirely on its own schedule — no curl to it involved anywhere in that.
+Then trigger the function yourself: in the Netlify UI, open this deploy → Functions →
+`agent-tick`, and use its **Run now** control. Poll the event log afterward — a
+`turn.started` / `chat.appended` / `turn.finished` trio for the scheduled turn, followed by
+`task.finished {"kind":"selfctl.turn","status":"done","taskId":"smoke-task-1",...}`, shows
+the tick picked the task up and drained it.
+
+(If you also want to see the automatic once-a-minute cadence — invocations rolling in on
+their own, each logging its claimed/done report — that only shows up on production, once
+this work has merged and deployed there.)
 
 ## What only a client can show you
 

@@ -11,21 +11,9 @@ import {
 import type { View } from "@selfctl/protocol";
 import { z } from "zod";
 
-// `sourceUrl` arrives as a tool argument chosen by the model — untrusted in
-// exactly the sense the mutations comment below calls out for payloads. It is
-// stored as-is and later flows straight into a `link` node's `href` and,
-// when it looks like an image, an `image` node's `src` (see `sourceView`): a
-// client navigates the first and fetches the second directly, on the
-// strength of nothing but this schema having accepted the string. Restricting
-// the scheme to `http:`/`https:` keeps a client from being handed
-// `javascript:`, `data:`, or `file:` to run or read; rejecting embedded
-// credentials keeps a crafted URL from leaking a `user:pass@` to whatever
-// host it names. `new URL()` is what actually answers "what scheme, what
-// credentials" — a regex over the raw string is the thing that gets fooled by
-// the URLs designed to fool it. `https:` is the one to reach for when writing
-// a note by hand, since it is encrypted end to end and `http:` is not, but an
-// old or internal source may legitimately still be `http:`, so both are
-// allowed here and the choice is left to whoever is typing the URL.
+// A URL that arrives through a tool argument is untrusted, and it ends up in
+// a link the client renders or an image it fetches — so it has to be
+// credential-free http/https, nothing else.
 const httpUrlNoCredentials = z.string().refine((value) => {
   let url: URL;
   try {
@@ -552,6 +540,10 @@ export const notesSkill: Skill = {
           throw new Error("Gemini returned no image for this note");
         }
 
+        // Stored before the human has decided anything, because the proposal
+        // card below has to show the image for a human to judge it. A
+        // rejected or abandoned proposal therefore leaves these bytes behind
+        // with nothing pointing at them — the kit has no orphan sweep yet.
         const asset = await rt.assets.put({
           bytes: Buffer.from(imagePart.inlineData.data, "base64"),
           contentType: imagePart.inlineData.mimeType,
