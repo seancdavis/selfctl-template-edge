@@ -1,4 +1,9 @@
-import { defineProposalKind, type Skill, type Sql } from "@selfctl/agent-kit";
+import {
+  defineMutation,
+  defineProposalKind,
+  type Skill,
+  type Sql,
+} from "@selfctl/agent-kit";
 import type { View } from "@selfctl/protocol";
 import { z } from "zod";
 
@@ -94,6 +99,30 @@ interface NoteRow {
   createdAt: Date;
 }
 
+// A mutation is a write with no approval card, because the person clicking
+// the button is already the trusted actor — the card only reaches them
+// through their own view of this agent. Before agent-kit 0.8.0 there was no
+// way for an agent's own view to offer one; a button like this existed only
+// for agents the app had a hand-written card for. The kit only checks that
+// `kind` names a mutation registered below; it has no way to check that a
+// `payload` or `confirm` came from somewhere trustworthy, so that part is on
+// whoever builds the view (see `noteListView`).
+const notesDeleteMutation = defineMutation({
+  kind: "notes.delete",
+  schema: z.object({ id: z.string() }),
+  write: async (sql, payload) => {
+    await sql`DELETE FROM notes WHERE id = ${payload.id}`;
+  },
+});
+
+const notesUnpinMutation = defineMutation({
+  kind: "notes.unpin",
+  schema: z.object({ id: z.string() }),
+  write: async (sql, payload) => {
+    await sql`UPDATE notes SET pinned = false WHERE id = ${payload.id}`;
+  },
+});
+
 const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp|avif)$/i;
 
 // `image` points at a URL that is already public on the internet, so any
@@ -134,6 +163,36 @@ function noteListView(notes: NoteRow[]): View {
               type: "text",
               value: note.createdAt.toISOString().slice(0, 10),
               style: "muted",
+            },
+            // `note.id` comes from the row this skill just selected out of
+            // its own table, never from a tool argument — that is what makes
+            // it safe to hand to a mutation. This node lives only on the
+            // emitted list card, never on `noteProposalView`: agent-kit 0.8.0
+            // refuses a proposal view carrying a `mutations` node outright,
+            // because a write that skips approval has no business sitting on
+            // a card still waiting for a human's decision.
+            {
+              type: "mutations",
+              items: [
+                ...(note.pinned
+                  ? [
+                      {
+                        label: "Unpin",
+                        kind: "notes.unpin",
+                        payload: { id: note.id },
+                      },
+                    ]
+                  : []),
+                {
+                  label: "Delete",
+                  kind: "notes.delete",
+                  payload: { id: note.id },
+                  // Deleting a note cannot be undone, so this outcome carries
+                  // real confirm text — the app turns any non-empty confirm
+                  // into a two-press button, and unpinning does not need one.
+                  confirm: "Delete this note? This cannot be undone.",
+                },
+              ],
             },
           ],
         }),
@@ -181,6 +240,7 @@ async function rememberTopic(
 export const notesSkill: Skill = {
   name: "notes",
   proposals: [noteProposalKind],
+  mutations: [notesDeleteMutation, notesUnpinMutation],
   tools: (rt) => [
     {
       name: "createNote",
