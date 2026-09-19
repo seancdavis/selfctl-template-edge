@@ -11,21 +11,46 @@ import {
 import type { View } from "@selfctl/protocol";
 import { z } from "zod";
 
+// `sourceUrl` arrives as a tool argument chosen by the model — untrusted in
+// exactly the sense the mutations comment below calls out for payloads. It is
+// stored as-is and later flows straight into a `link` node's `href` and,
+// when it looks like an image, an `image` node's `src` (see `sourceView`): a
+// client navigates the first and fetches the second directly, on the
+// strength of nothing but this schema having accepted the string. Restricting
+// the scheme to `http:`/`https:` keeps a client from being handed
+// `javascript:`, `data:`, or `file:` to run or read; rejecting embedded
+// credentials keeps a crafted URL from leaking a `user:pass@` to whatever
+// host it names. `new URL()` is what actually answers "what scheme, what
+// credentials" — a regex over the raw string is the thing that gets fooled by
+// the URLs designed to fool it. `https:` is the one to reach for when writing
+// a note by hand, since it is encrypted end to end and `http:` is not, but an
+// old or internal source may legitimately still be `http:`, so both are
+// allowed here and the choice is left to whoever is typing the URL.
+const httpUrlNoCredentials = z.string().refine((value) => {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  return (
+    (url.protocol === "http:" || url.protocol === "https:") &&
+    url.username === "" &&
+    url.password === ""
+  );
+}, "sourceUrl must be an http(s) URL with no embedded credentials");
+
 // The `reference.note` proposal kind. `topic` is a short label the model picks;
 // it exists so this skill has something worth remembering between turns (see
 // `rememberTopic` below).
 const NotePayload = z.object({
   text: z.string().min(1).max(4000),
   topic: z.string().min(1).max(80),
-  sourceUrl: z.string().url().optional(),
+  sourceUrl: httpUrlNoCredentials.optional(),
 });
 
 type NotePayload = z.infer<typeof NotePayload>;
 
-// Returns the new row's id. Most callers still have no use for it — the
-// plain `write` below discards it same as always — but the `pin` outcome
-// needs it to queue that note's own auto-unpin chore, and it can only get it
-// from the INSERT that created the row.
 async function insertNote(
   sql: Sql,
   payload: NotePayload,
@@ -60,13 +85,15 @@ const noteProposalKind = defineProposalKind({
     await insertNote(sql, payload, false);
   },
   outcomes: {
-    save: savingOutcome(false),
+    save: {
+      write: async (sql: Sql, payload: NotePayload) => {
+        await insertNote(sql, payload, false);
+      },
+    },
     // `pin` is the only outcome that also queues `notes.autoUnpin`, seven
     // days out, in the same transaction as the insert — the note is pinned
     // and the chore to undo that exists atomically, or neither does. `save`
-    // never pins, so it has nothing for that chore to undo; building it from
-    // `savingOutcome` like the others would queue a task for a commitment
-    // that was never made.
+    // never pins, so it has nothing for that chore to undo.
     pin: {
       write: async (sql: Sql, payload: NotePayload) => {
         const id = await insertNote(sql, payload, true);
@@ -80,14 +107,6 @@ const noteProposalKind = defineProposalKind({
     skip: { write: async () => {} },
   },
 });
-
-function savingOutcome(pinned: boolean) {
-  return {
-    write: async (sql: Sql, payload: NotePayload) => {
-      await insertNote(sql, payload, pinned);
-    },
-  };
-}
 
 // How this proposal should look. A view is composed from a fixed set of
 // primitives — stack, text, image, keyValue, badge, actions, link — and every
@@ -176,12 +195,13 @@ interface NoteRow {
 
 // A mutation is a write with no approval card, because the person clicking
 // the button is already the trusted actor — the card only reaches them
-// through their own view of this agent. Before agent-kit 0.8.0 there was no
-// way for an agent's own view to offer one; a button like this existed only
-// for agents the app had a hand-written card for. The kit only checks that
-// `kind` names a mutation registered below; it has no way to check that a
-// `payload` or `confirm` came from somewhere trustworthy, so that part is on
-// whoever builds the view (see `noteListView`).
+// through their own view of this agent. The kit only checks that `kind`
+// names a mutation registered below; it has no way to check that a `payload`
+// or `confirm` came from somewhere trustworthy, so that part is on whoever
+// builds the view: a mutation's `kind` and `payload` must come from the
+// skill's own reads, never from a tool argument, and the `mutations` node
+// carrying them must never appear on a proposal's view, which is still
+// waiting for a human's decision (see `noteListView`).
 const notesDeleteMutation = defineMutation({
   kind: "notes.delete",
   schema: z.object({ id: z.string() }),
