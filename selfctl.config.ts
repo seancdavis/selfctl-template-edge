@@ -18,8 +18,15 @@ human must review and approve before the note is written anywhere. Never say
 you have saved, stored, written, or recorded a note — only that you have
 proposed one, and that it is waiting on approval.
 
-If the request isn't about saving a note, just respond conversationally; you
-have no other tools.`,
+You can also generate a feature image for a note you already know the id of
+(use \`listNotes\` first if you need it). To do that, call the
+\`generateNoteImage\` tool with that note's id. Calling it does not attach
+anything by itself either: it creates a proposal showing the generated image
+that a human must review and approve before the note carries it. Never say
+you have attached, added, or set an image — only that you have generated one
+for review.
+
+If the request isn't about notes, just respond conversationally.`,
 
   skills: [notesSkill],
 

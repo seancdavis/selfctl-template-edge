@@ -1,3 +1,4 @@
+import { GoogleGenAI } from "@google/genai";
 import {
   defineMutation,
   defineProposalKind,
@@ -122,11 +123,54 @@ function noteProposalView(payload: NotePayload): View {
   };
 }
 
+// A second proposal kind, shaped like `noteProposalKind` above: the model can
+// generate something, but only a human's approval makes it real. Unlike
+// `reference.note`, this one needs no named outcomes — attach the image or
+// don't, there is no equivalent of "save and pin" for a picture.
+const NoteImagePayload = z.object({
+  noteId: z.string(),
+  assetId: z.string(),
+});
+
+type NoteImagePayload = z.infer<typeof NoteImagePayload>;
+
+const noteImageProposalKind = defineProposalKind({
+  kind: "reference.note.image",
+  schema: NoteImagePayload,
+  write: async (sql, payload) => {
+    await sql`
+      UPDATE notes SET image_asset_id = ${payload.assetId} WHERE id = ${payload.noteId}
+    `;
+  },
+});
+
+// Same reasoning as `noteProposalView`: every value here is literal, already
+// known by the time the tool that builds this view has run. The `asset` node
+// carries only the id `rt.assets.put` returned — never a URL, because there
+// isn't one to carry. A client resolves that id with its own bearer against
+// `GET /assets/:id`; nothing about the id does anything without that token,
+// which is the whole reason this is `asset` and not `image`.
+function noteImageProposalView(payload: NoteImagePayload): View {
+  return {
+    type: "stack",
+    direction: "vertical",
+    children: [
+      {
+        type: "text",
+        value: "Attach this generated image to the note?",
+        style: "heading",
+      },
+      { type: "asset", id: payload.assetId, alt: "Generated feature image" },
+    ],
+  };
+}
+
 interface NoteRow {
   id: string;
   text: string;
   pinned: boolean;
   sourceUrl: string | null;
+  imageAssetId: string | null;
   createdAt: Date;
 }
 
@@ -205,6 +249,17 @@ function noteListView(notes: NoteRow[]): View {
               ? [{ type: "badge", label: "pinned" } as View]
               : []),
             ...(note.sourceUrl ? [sourceView(note.sourceUrl)] : []),
+            // Only an id ever reaches this node — see `noteImageProposalView`
+            // for why that is the entire point of `asset` over `image`.
+            ...(note.imageAssetId
+              ? [
+                  {
+                    type: "asset",
+                    id: note.imageAssetId,
+                    alt: "Generated feature image",
+                  } as View,
+                ]
+              : []),
             {
               type: "text",
               value: note.createdAt.toISOString().slice(0, 10),
@@ -328,13 +383,26 @@ async function rememberTopic(
   );
 }
 
-// The tools the model calls. Neither writes to a domain table: `rt.propose`
-// records a pending proposal and nothing lands in `notes` until a human picks
-// an outcome, and `rt.db` is a read handle enforced by a read-only database
-// transaction, so a stray INSERT there fails rather than quietly succeeding.
+// Picked by checking the AI Gateway's live model list at implementation time
+// (docs.netlify.com/build/ai-gateway/overview's "Model availability" table),
+// not copied from a prior run or from memory — that list changes, and a
+// stale id here would fail at call time, invisibly to `npm run typecheck`.
+// The `-image` suffix is Google's marker for a model that can return inline
+// image bytes rather than only text; the `flash` tier is the cheap, fast one
+// among the currently served image models, which suits a demo generation
+// better than the heavier `-pro-image` sibling.
+const IMAGE_MODEL = "gemini-3.1-flash-image";
+
+// The tools the model calls. None of them writes to a domain table directly:
+// `rt.propose` records a pending proposal and nothing lands in `notes` until
+// a human picks an outcome; `rt.db` is a read handle enforced by a read-only
+// database transaction, so a stray INSERT there fails rather than quietly
+// succeeding; and `rt.assets.put` stores bytes with no proposal at all,
+// because an unreferenced asset can't yet affect anything the gate protects
+// (see `noteImageProposalView` for what makes it reachable).
 export const notesSkill: Skill = {
   name: "notes",
-  proposals: [noteProposalKind],
+  proposals: [noteProposalKind, noteImageProposalKind],
   mutations: [notesDeleteMutation, notesUnpinMutation],
   widgets: [notesStatsWidget],
   taskHandlers: [autoUnpinHandler],
@@ -394,10 +462,11 @@ export const notesSkill: Skill = {
             text: string;
             pinned: boolean;
             source_url: string | null;
+            image_asset_id: string | null;
             created_at: Date;
           }[]
         >`
-          SELECT id, text, pinned, source_url, created_at FROM notes
+          SELECT id, text, pinned, source_url, image_asset_id, created_at FROM notes
           ORDER BY pinned DESC, created_at DESC LIMIT 20
         `;
         const notes: NoteRow[] = rows.map((row) => ({
@@ -405,6 +474,7 @@ export const notesSkill: Skill = {
           text: row.text,
           pinned: row.pinned,
           sourceUrl: row.source_url,
+          imageAssetId: row.image_asset_id,
           createdAt: row.created_at,
         }));
         // The payload is the data; the view is how to draw it. A client that
@@ -412,6 +482,71 @@ export const notesSkill: Skill = {
         // built from the payload rather than showing nothing.
         rt.emit("reference.note-list", { notes }, noteListView(notes));
         return notes;
+      },
+    },
+    {
+      name: "generateNoteImage",
+      description:
+        "Generate a feature image for an existing note, from its text. This only creates a proposal showing the image — a human must approve it before the note carries it.",
+      parameters: {
+        type: "object",
+        properties: {
+          noteId: {
+            type: "string",
+            description: "The id of the note to generate an image for.",
+          },
+        },
+        required: ["noteId"],
+        additionalProperties: false,
+      },
+      execute: async (args: unknown) => {
+        const { noteId } = z.object({ noteId: z.string() }).parse(args);
+
+        // The same read-only handle `listNotes` uses above — this tool has
+        // no write of its own to make. Only `noteImageProposalKind`'s
+        // `write`, run after a human approves, is allowed to touch the row.
+        const [note] = await rt.db<{ text: string }[]>`
+          SELECT text FROM notes WHERE id = ${noteId}
+        `;
+        if (!note) throw new Error(`No note with id ${noteId}`);
+
+        // Constructed here, not at module scope: the gateway injects
+        // Gemini's credentials into `process.env` per request, so a client
+        // built when this file first loads would find them missing.
+        const ai = new GoogleGenAI({});
+        const response = await ai.models.generateContent({
+          model: IMAGE_MODEL,
+          contents: `Generate a simple feature image for a note that reads: ${note.text}`,
+          config: { responseModalities: ["IMAGE"] },
+        });
+
+        // The SDK's own `.data` convenience getter concatenates every inline
+        // part into one re-encoded base64 string and drops which part had
+        // which mime type — useless here, since `rt.assets.put` needs both.
+        // Walking `candidates[0].content.parts` directly is the only way to
+        // get bytes and their content type from the same part.
+        const imagePart = response.candidates?.[0]?.content?.parts?.find(
+          (part) => part.inlineData?.data,
+        );
+        if (!imagePart?.inlineData?.data || !imagePart.inlineData.mimeType) {
+          throw new Error("Gemini returned no image for this note");
+        }
+
+        const asset = await rt.assets.put({
+          bytes: Buffer.from(imagePart.inlineData.data, "base64"),
+          contentType: imagePart.inlineData.mimeType,
+        });
+
+        // The row `put` returns also carries a URL field, always null for a
+        // bytes upload, and it is never read here — the id above is the
+        // only handle a card is allowed to carry. There is no public path to
+        // an asset's bytes by design (see `noteImageProposalView`).
+        const payload: NoteImagePayload = { noteId, assetId: asset.id };
+        return rt.propose(
+          "reference.note.image",
+          payload,
+          noteImageProposalView(payload),
+        );
       },
     },
   ],

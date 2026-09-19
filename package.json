@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@google/genai": "^2.23.0",
     "@netlify/database": "^2.0.0",
     "@selfctl/agent-kit": "^0.8.0",
     "@selfctl/protocol": "^0.6.0",
