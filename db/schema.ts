@@ -23,6 +23,10 @@ export const notes = pgTable("notes", {
     .defaultNow()
     .notNull(),
   sourceUrl: text("source_url"),
+  // Where `source_url` is a page the note came from, this is a URL pointing
+  // directly at a picture — see `skills/notes.ts` for why these are two
+  // separate, independent fields rather than one guessed apart by shape.
+  imageUrl: text("image_url"),
   imageAssetId: text("image_asset_id"),
 });
 

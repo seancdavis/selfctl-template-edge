@@ -26,15 +26,24 @@ const httpUrlNoCredentials = z.string().refine((value) => {
     url.username === "" &&
     url.password === ""
   );
-}, "sourceUrl must be an http(s) URL with no embedded credentials");
+}, "must be an http(s) URL with no embedded credentials");
 
 // The `reference.note` proposal kind. `topic` is a short label the model picks;
 // it exists so this skill has something worth remembering between turns (see
 // `rememberTopic` below).
+//
+// `sourceUrl` and `imageUrl` are separate, independently optional fields —
+// not one field the code guesses at. A URL's shape cannot tell you what it
+// points to: a CDN image URL (Unsplash, Cloudinary, Netlify's own Image CDN)
+// routinely carries no file extension at all once resize/format query
+// parameters are in play, so sniffing the string can't classify it and no
+// amount of regex-tightening fixes that. The model already knows which one
+// it has from context, so it says so directly.
 const NotePayload = z.object({
   text: z.string().min(1).max(4000),
   topic: z.string().min(1).max(80),
   sourceUrl: httpUrlNoCredentials.optional(),
+  imageUrl: httpUrlNoCredentials.optional(),
 });
 
 type NotePayload = z.infer<typeof NotePayload>;
@@ -45,8 +54,8 @@ async function insertNote(
   pinned: boolean,
 ): Promise<string> {
   const [row] = await sql<{ id: string }[]>`
-    INSERT INTO notes (text, pinned, source_url)
-    VALUES (${payload.text}, ${pinned}, ${payload.sourceUrl ?? null})
+    INSERT INTO notes (text, pinned, source_url, image_url)
+    VALUES (${payload.text}, ${pinned}, ${payload.sourceUrl ?? null}, ${payload.imageUrl ?? null})
     RETURNING id
   `;
   return row.id;
@@ -116,6 +125,12 @@ function noteProposalView(payload: NotePayload): View {
       ...(payload.sourceUrl
         ? [{ type: "link", href: payload.sourceUrl, label: "Source" } as View]
         : []),
+      // Unlike `sourceUrl`, an `imageUrl` picture is exactly what the human
+      // is being asked to approve, so the card shows it rather than just
+      // naming it.
+      ...(payload.imageUrl
+        ? [{ type: "image", src: payload.imageUrl, alt: "Note image" } as View]
+        : []),
       {
         type: "actions",
         items: [
@@ -134,6 +149,12 @@ function noteProposalView(payload: NotePayload): View {
 // generate something, but only a human's approval makes it real. Unlike
 // `reference.note`, this one needs no named outcomes — attach the image or
 // don't, there is no equivalent of "save and pin" for a picture.
+//
+// The kind's last dot-separated segment is not decorative: the desktop app
+// builds a proposal card's heading by taking it and prefixing "wants to", so
+// this reads as "wants to attach" in the client. Name a kind with that in
+// mind — the noun this kind used to end in made the same card read "wants
+// to image", which is not a verb.
 const NoteImagePayload = z.object({
   noteId: z.string(),
   assetId: z.string(),
@@ -142,7 +163,7 @@ const NoteImagePayload = z.object({
 type NoteImagePayload = z.infer<typeof NoteImagePayload>;
 
 const noteImageProposalKind = defineProposalKind({
-  kind: "reference.note.image",
+  kind: "reference.note.attach",
   schema: NoteImagePayload,
   write: async (sql, payload) => {
     await sql`
@@ -177,6 +198,7 @@ interface NoteRow {
   text: string;
   pinned: boolean;
   sourceUrl: string | null;
+  imageUrl: string | null;
   imageAssetId: string | null;
   createdAt: Date;
 }
@@ -221,18 +243,6 @@ const autoUnpinHandler: TaskHandlerDef = {
   },
 };
 
-const IMAGE_EXTENSION = /\.(png|jpe?g|gif|webp|avif)$/i;
-
-// `image` points at a URL that is already public on the internet, so any
-// client can fetch it directly. `asset` (a later slice) instead carries an id
-// that only a bearer token can resolve. That difference is the whole reason
-// both nodes exist: this one is for a source the agent never had to store.
-function sourceView(sourceUrl: string): View {
-  return IMAGE_EXTENSION.test(sourceUrl)
-    ? { type: "image", src: sourceUrl, alt: "Linked image" }
-    : { type: "link", href: sourceUrl, label: "Source" };
-}
-
 // The same vocabulary describes an inline chat component. Note the repetition
 // is unrolled here rather than expressed as a loop: there is no `list`
 // primitive, because the agent is the thing holding the array and can simply
@@ -256,9 +266,24 @@ function noteListView(notes: NoteRow[]): View {
             ...(note.pinned
               ? [{ type: "badge", label: "pinned" } as View]
               : []),
-            ...(note.sourceUrl ? [sourceView(note.sourceUrl)] : []),
-            // Only an id ever reaches this node — see `noteImageProposalView`
-            // for why that is the entire point of `asset` over `image`.
+            // `link` and `image` are independent nodes now, not a guess
+            // branching on one field's shape — a note may carry a source
+            // page, a picture, both, or neither.
+            ...(note.sourceUrl
+              ? [{ type: "link", href: note.sourceUrl, label: "Source" } as View]
+              : []),
+            ...(note.imageUrl
+              ? [{ type: "image", src: note.imageUrl, alt: "Note image" } as View]
+              : []),
+            // `image` points at a URL that is already public on the internet,
+            // so any client fetches it directly. `asset` instead carries an
+            // id that only a bearer token can resolve. That distinction is
+            // the whole reason both nodes exist, and with `imageUrl` and the
+            // generated `imageAssetId` able to sit on the same note, this
+            // template shows a public picture and a private one side by
+            // side. Only an id ever reaches the node below — see
+            // `noteImageProposalView` for why that is the entire point of
+            // `asset` over `image`.
             ...(note.imageAssetId
               ? [
                   {
@@ -434,7 +459,12 @@ export const notesSkill: Skill = {
           sourceUrl: {
             type: "string",
             description:
-              "Where this note came from, if it was prompted by a URL the user shared. Optional — omit it for a note with no source.",
+              "The page this note came from, if it was prompted by a URL the user shared — an article, a listing, a profile, anything meant to be opened and read. Renders as a link. Optional and independent of imageUrl — a note can have either, both, or neither.",
+          },
+          imageUrl: {
+            type: "string",
+            description:
+              "A URL that points directly at a picture (the image bytes themselves, not a page that merely contains one), to show alongside the note. Renders as an image. Use this — not sourceUrl — whenever the URL itself is a photo or graphic, even if it has no file extension (common for CDN and Unsplash-style URLs). Optional and independent of sourceUrl.",
           },
         },
         required: ["text", "topic"],
@@ -470,11 +500,12 @@ export const notesSkill: Skill = {
             text: string;
             pinned: boolean;
             source_url: string | null;
+            image_url: string | null;
             image_asset_id: string | null;
             created_at: Date;
           }[]
         >`
-          SELECT id, text, pinned, source_url, image_asset_id, created_at FROM notes
+          SELECT id, text, pinned, source_url, image_url, image_asset_id, created_at FROM notes
           ORDER BY pinned DESC, created_at DESC LIMIT 20
         `;
         const notes: NoteRow[] = rows.map((row) => ({
@@ -482,6 +513,7 @@ export const notesSkill: Skill = {
           text: row.text,
           pinned: row.pinned,
           sourceUrl: row.source_url,
+          imageUrl: row.image_url,
           imageAssetId: row.image_asset_id,
           createdAt: row.created_at,
         }));
@@ -555,7 +587,7 @@ export const notesSkill: Skill = {
         // an asset's bytes by design (see `noteImageProposalView`).
         const payload: NoteImagePayload = { noteId, assetId: asset.id };
         return rt.propose(
-          "reference.note.image",
+          "reference.note.attach",
           payload,
           noteImageProposalView(payload),
         );

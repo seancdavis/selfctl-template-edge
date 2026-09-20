@@ -69,10 +69,13 @@ T=<id from above>
 
 ```sh
 # 3. A message. The model calls `createNote`, which only proposes — nothing is
-#    saved yet. The source URL ends in .jpg on purpose (see step 9) and, unlike
-#    example.com, actually returns image bytes when fetched.
+#    saved yet. The message names both a source page (sourceUrl, renders as a
+#    link) and a direct picture URL (imageUrl, renders as an image) — see
+#    step 9. The image URL deliberately carries no file extension (a resize
+#    query param instead, like a real Unsplash/CDN URL) to prove the fields
+#    are told apart by the model, not guessed from the URL's shape.
 curl -s -X POST -H "$K" -H "content-type: application/json" \
-  -d "{\"threadId\":\"$T\",\"text\":\"Please add a note that says 'Remember to read this later.' It is sourced from https://upload.wikimedia.org/wikipedia/commons/3/3a/Cat03.jpg.\"}" \
+  -d "{\"threadId\":\"$T\",\"text\":\"Please add a note that says 'Remember to read this later.' It is from https://example.com/cats-article, and here is a picture to go with it: https://images.unsplash.com/photo-1667599611951-7e27a50f690e?w=400.\"}" \
   "$BASE/message"
 ```
 
@@ -88,8 +91,9 @@ curl -s -H "$K" "$BASE/events?since=0"
 
 On a deploy this actually completes — the gateway has real credentials here, so expect
 `thread.created`, `turn.started`, `chat.appended` (the user message), `proposal.created`
-(kind `reference.note`, payload carrying your `sourceUrl`), `chat.appended` (the
-assistant's reply), then `turn.finished` with `status: "done"`. Grab the proposal id:
+(kind `reference.note`, payload carrying both your `sourceUrl` and `imageUrl`),
+`chat.appended` (the assistant's reply), then `turn.finished` with `status: "done"`. Grab
+the proposal id:
 
 ```sh
 P=<id from proposal.created above>
@@ -143,9 +147,9 @@ exactly this.)
 
 ```sh
 # 9. Ask the agent to list its notes. This is what emits the reference.note-list
-#    view built in noteListView — the one place link-vs-image actually branches
-#    on the URL's extension (the proposal view above always renders a plain
-#    link; it has nothing to preview yet). It's also how you find the note's id.
+#    view built in noteListView — `link` and `image` are independent nodes now,
+#    not a guess branching on one field's shape, so a note with both fields
+#    should render both. It's also how you find the note's id.
 curl -s -X POST -H "$K" -H "content-type: application/json" \
   -d "{\"threadId\":\"$T\",\"text\":\"Please list my notes.\"}" \
   "$BASE/message"
@@ -154,11 +158,13 @@ curl -s -H "$K" "$BASE/threads/$T/messages"
 ```
 
 Find the assistant message with `components: [{"kind":"reference.note-list",...}]`. Its
-view's `stack` for your note should carry a `badge` ("pinned") and, because the source
-URL ends in `.jpg`, an `image` node
-(`{"type":"image","src":"https://upload.wikimedia.org/wikipedia/commons/3/3a/Cat03.jpg",...}`)
-rather than a `link` node — that's the structural proof the branch in `sourceView()`
-fired. The payload alongside it carries the note's id:
+view's `stack` for your note should carry a `badge` ("pinned"), a `link` node for
+`sourceUrl` (`{"type":"link","href":"https://example.com/cats-article","label":"Source"}`),
+and an `image` node for `imageUrl`
+(`{"type":"image","src":"https://images.unsplash.com/photo-1667599611951-7e27a50f690e?w=400",...}`)
+— both present at once, which is the structural proof the two fields render
+independently now rather than one being derived from the other. The payload alongside it
+carries the note's id:
 
 ```sh
 N=<note id from the reference.note-list payload>
@@ -185,7 +191,7 @@ curl -s -X POST -H "$K" -H "content-type: application/json" \
 curl -s -H "$K" "$BASE/events?since=<cursor from step 9>"
 ```
 
-Look for `proposal.created` with kind `reference.note.image`, payload `{"noteId":"...","assetId":"..."}`.
+Look for `proposal.created` with kind `reference.note.attach`, payload `{"noteId":"...","assetId":"..."}`.
 Grab both, then approve (a plain approve — this kind has no named outcomes):
 
 ```sh
@@ -240,10 +246,11 @@ Everything above proves the wiring with raw JSON. How it actually *looks* — wh
 you have to judge by eye, in a protocol client (the desktop app) pointed at `$BASE` with
 the same connection token. Look for:
 
-- The note from step 3 shows its cover picture inline, not a bare link. Add a second note
-  by hand with a source URL that *doesn't* end in an image extension (e.g. a plain
-  `https://example.com/article`) and confirm that one renders as a tappable "Source" link
-  instead — that's the two node types side by side.
+- The note from step 3 shows both a tappable "Source" link and its cover picture inline,
+  at once — `sourceUrl` and `imageUrl` rendering independently, not one guessed from the
+  other's shape. Add a second note by hand with only a `sourceUrl` (no picture URL) and
+  confirm that one renders as a link with no image — the two fields are optional and
+  independent, not a package deal.
 - After approving the feature image in step 12, the same note grows a second picture —
   the generated `asset` — distinct from the first: one is a URL the client fetched
   directly, the other only resolved because the client presented its bearer.
