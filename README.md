@@ -111,7 +111,7 @@ surface (threads, messages, the event log, streaming, the scheduled tick).
 | Variable | Required | What it does |
 |---|---|---|
 | `AGENT_ADMIN_KEY` | yes | The one root secret. Gates the admin routes and mints the connection token. |
-| `OPENROUTER_API_KEY` | only if you switch providers | The default provider is Netlify AI Gateway, which needs no key of yours. |
+| `OPENROUTER_API_KEY` | no | AI Gateway injects it for the `provider: "openrouter"` models in the picker. Set your own only to call OpenRouter directly; doing so stops the gateway injecting one. |
 
 ## License
 

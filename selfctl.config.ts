@@ -31,13 +31,15 @@ If the request isn't about notes, just respond conversationally.`,
   skills: [notesSkill],
 
   // The curated list the per-conversation picker offers and the only values
-  // `POST /agent/config/settings` accepts. The kit's default provider is
-  // Netlify AI Gateway — the Anthropic SDK underneath — so only Claude ids are
-  // valid here; an OpenRouter id would fail at call time. Keep it a small,
-  // stable, valid subset of the AI Gateway's Anthropic models.
+  // `POST /agent/config/settings` accepts. Both providers go through Netlify
+  // AI Gateway, so no keys are needed. An entry naming `provider: "openrouter"`
+  // takes an OpenRouter slug. An entry with none uses the agent's provider
+  // (`netlify-aig`, the Anthropic SDK underneath) and takes a bare Claude id.
+  // Keep every id one the gateway actually serves.
   models: {
-    default: "claude-haiku-4-5",
+    default: "z-ai/glm-5.3",
     shortlist: [
+      { id: "z-ai/glm-5.3", label: "GLM 5.3", provider: "openrouter" },
       { id: "claude-haiku-4-5", label: "Haiku 4.5" },
       { id: "claude-sonnet-4-5", label: "Sonnet 4.5" },
       { id: "claude-opus-4-5", label: "Opus 4.5" },
